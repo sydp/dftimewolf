@@ -65,6 +65,7 @@ class TimesketchSearchEventCollector(module.BaseModule):
   def SetUp(
       self,
       sketch_id: str | None = None,
+      saved_search_id: int | None = None,
       query_string: str = '*',
       start_datetime: datetime.datetime | None = None,
       end_datetime: datetime.datetime | None = None,
@@ -85,6 +86,7 @@ class TimesketchSearchEventCollector(module.BaseModule):
     Args:
       sketch_id: the Timesketch sketch ID.  Defaults to the value
           in the ticket attribute container.
+      saved_search_id: the comma-separated saved search IDs.
       query_string: the query string.  Defaults to '*' (all events).
       start_datetime: the start datetime.
       end_datetime: the end datetime.
@@ -115,28 +117,33 @@ class TimesketchSearchEventCollector(module.BaseModule):
     else:
       self.sketch_id = int(sketch_id)
 
-    if not start_datetime or not end_datetime:
-      self.ModuleError(
-          'Both the start and end datetime must be set.', critical=True)
-
+    
     if output_format not in _VALID_OUTPUT_FORMATS:
       self.ModuleError(
           f'Output format not one of {",".join(_VALID_OUTPUT_FORMATS)}',
           critical=True)
 
+    if saved_search_id:
+      self.saved_search_id = int(saved_search_id)
+
+    else:
+      if not start_datetime or not end_datetime:
+        self.ModuleError(
+            'Both the start and end datetime must be set.', critical=True)
+      self.start_datetime = start_datetime
+      self.end_datetime = end_datetime
+
+      self.query_string = query_string
+      if labels:
+        self.labels = [label.strip() for label in labels.split(',')]
+      if indices:
+        self.indices = [int(index) for index in indices.split(',')]
+    
+
     self.sketch = self._GetSketch(token_password, endpoint, username, password)
-    self.start_datetime = start_datetime
-    self.end_datetime = end_datetime
-    self.query_string = query_string
     self.return_fields = return_fields
     self.output_format = output_format
     self.include_internal_columns = include_internal_columns
-
-    if labels:
-      self.labels = [label.strip() for label in labels.split(',')]
-
-    if indices:
-      self.indices = [int(index) for index in indices.split(',')]
 
     if search_name:
       self.search_name = search_name
@@ -194,29 +201,33 @@ class TimesketchSearchEventCollector(module.BaseModule):
     Returns:
       the results in a Pandas dataframe.
     """
-    search_obj = search.Search(self.sketch)
-    search_obj.query_string = self.query_string
+    if self.saved_search_id:
+      search_obj = search.Search.from_saved(self.saved_search_id)
+    else:
+      search_obj = search.Search(self.sketch)
+      search_obj.query_string = self.query_string
+      if self.indices:
+        search_obj.indices = self.indices
+
+      if self.start_datetime and self.end_datetime:
+        range_chip = search.DateRangeChip()
+        range_chip.add_start_time(
+            self.start_datetime.strftime('%Y-%m-%dT%H:%M:%S.%f'))
+        range_chip.add_end_time(
+            self.end_datetime.strftime('%Y-%m-%dT%H:%M:%S.%f'))
+        search_obj.add_chip(range_chip)
+
+      for label in self.labels:
+        label_chip = search.LabelChip()
+        if label == 'star':
+          label_chip.use_star_label()
+        elif label == 'comment':
+          label_chip.use_comment_label()
+        else:
+          label_chip.label = label
+        search_obj.add_chip(label_chip)
+      
     search_obj.return_fields = self.return_fields
-    if self.indices:
-      search_obj.indices = self.indices
-
-    if self.start_datetime and self.end_datetime:
-      range_chip = search.DateRangeChip()
-      range_chip.add_start_time(
-          self.start_datetime.strftime('%Y-%m-%dT%H:%M:%S.%f'))
-      range_chip.add_end_time(
-          self.end_datetime.strftime('%Y-%m-%dT%H:%M:%S.%f'))
-      search_obj.add_chip(range_chip)
-
-    for label in self.labels:
-      label_chip = search.LabelChip()
-      if label == "star":
-        label_chip.use_star_label()
-      elif label == "comment":
-        label_chip.use_comment_label()
-      else:
-        label_chip.label = label
-      search_obj.add_chip(label_chip)
     return search_obj.to_pandas()
 
   def _OutputSearchResults(self, data_frame: pd.DataFrame) -> None:
@@ -228,8 +239,8 @@ class TimesketchSearchEventCollector(module.BaseModule):
     if not self.include_internal_columns:
       # Remove internal OpenSearch columns
       data_frame = data_frame.drop(
-          columns=["__ts_timeline_id", "_id", "_index", "_source", "_type"],
-          errors="ignore")
+          columns=['__ts_timeline_id', '_id', '_index', '_source', '_type'],
+          errors='ignore')
 
     if self.output_format == 'pandas':
       self.StoreContainer(
@@ -244,12 +255,12 @@ class TimesketchSearchEventCollector(module.BaseModule):
           encoding='utf-8',
           prefix=f'{self.search_name}_' if self.search_name else '',
           suffix=f'.{self.output_format}') as output_file:
-        if self.output_format == "csv":
+        if self.output_format == 'csv':
           data_frame.to_csv(output_file, index=False)
-        elif self.output_format == "json":
-          data_frame.to_json(output_file, orient="records", lines=False)
-        elif self.output_format == "jsonl":
-          data_frame.to_json(output_file, orient="records", lines=True)
+        elif self.output_format == 'json':
+          data_frame.to_json(output_file, orient='records', lines=False)
+        elif self.output_format == 'jsonl':
+          data_frame.to_json(output_file, orient='records', lines=True)
         else:
           self.ModuleError('Unexpected output format', critical=True)
         self.StoreContainer(containers.File(
